@@ -10847,10 +10847,10 @@ function getTimes(){return window.__times||[];}
 function fmtDur(ms){if(!ms)return"—";const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);if(h>0)return`${h}h${String(m%60).padStart(2,"0")}m`;if(m>0)return`${m}m${String(s%60).padStart(2,"0")}s`;return`${s}s`;}
 
 function ScanScreen({ordens,onUpdate}){
-  const[si,setSi]=useState("");const[so,setSo]=useState(null);const[obs,setObs]=useState("");const[fb,setFb]=useState(null);const[lock,setLock]=useState(false);const[oper,setOper]=useState(()=>LS.get("op-last-oper",""));const ir=useRef();const lr=useRef({c:"",t:0});
+  const[si,setSi]=useState("");const[so,setSo]=useState(null);const[obs,setObs]=useState("");const[fb,setFb]=useState(null);const[lock,setLock]=useState(false);const[maqScan,setMaqScan]=useState(()=>LS.get("op-last-maq",""));const ir=useRef();const lr=useRef({c:"",t:0});
   useEffect(()=>{ir.current?.focus();},[]);
   useEffect(()=>{if(so){const u=ordens.find(o=>o.controle===so.controle);if(u)setSo(u);}},[ordens]);
-  useEffect(()=>{LS.set("op-last-oper",oper);},[oper]);
+  useEffect(()=>{LS.set("op-last-maq",maqScan);},[maqScan]);
   const scan=val=>{
     const v=val.trim();if(!v)return;
     const now=Date.now();
@@ -10861,6 +10861,7 @@ function ScanScreen({ordens,onUpdate}){
       const ctrl=parseInt(mp[1]),pn=parseInt(mp[2]);
       const found=ordens.find(o=>o.controle===ctrl);
       if(!found){setFb({t:"error",m:`Ordem ${ctrl} não encontrada.`});setSo(null);beep("err");return;}
+      if(found.cancelada){setFb({t:"error",m:`❌ Ordem ${ctrl} está CANCELADA.`});beep("err");return;}
       setSo(found);setObs("");
       const procs=[...(found.processos||[])];const p=procs[pn-1];
       if(!p){setFb({t:"error",m:`P${pn} inválido.`});beep("err");return;}
@@ -10879,13 +10880,13 @@ function ScanScreen({ordens,onUpdate}){
           setFb({t:"error",m:`❌ Processo "${outroProcAberto.name}" já em andamento nesta ordem. Finalize-o antes de iniciar outro.`});
           beep("err");return;
         }
-        procs[pn-1]={...p,started:true,startAt:new Date().toLocaleString("pt-BR"),startTs:Date.now(),operator:oper};
+        procs[pn-1]={...p,started:true,startAt:new Date().toLocaleString("pt-BR"),startTs:Date.now(),operator:maqScan};
         onUpdate({...found,processos:procs});
-        setFb({t:"start",m:`▶ P${pn} "${p.name}" INICIADO${oper?` — Op: ${oper}`:""}`});beep("start");
+        setFb({t:"start",m:`▶ P${pn} "${p.name}" INICIADO${maqScan?` — Máq: ${maqScan}`:""}`});beep("start");
       } else {
         const dur=p.startTs?Date.now()-p.startTs:0;
-        procs[pn-1]={...p,done:true,doneAt:new Date().toLocaleString("pt-BR"),doneTs:Date.now(),duration:dur,operator:oper||p.operator,obs:obs||""};
-        saveTime(found.codigo,p.name,dur,oper||p.operator||"");
+        procs[pn-1]={...p,done:true,doneAt:new Date().toLocaleString("pt-BR"),doneTs:Date.now(),duration:dur,operator:maqScan||p.operator,obs:obs||""};
+        saveTime(found.codigo,p.name,dur,maqScan||p.operator||"");
         const allD=procs.every(x=>x.done);
         const upd={...found,processos:procs};
         if(allD){upd.dataBaixa=new Date().toLocaleDateString("pt-BR");upd.baixa="X";}
@@ -10899,21 +10900,47 @@ function ScanScreen({ordens,onUpdate}){
     setFb({t:"error",m:`"${v}" não reconhecido.`});setSo(null);beep("err");};
   const kd=e=>{if(e.key==="Enter"){scan(si);setSi("");}};
   const ci=so?(so.processos||[]).findIndex(p=>!p.done):-1;
-  const baixa=()=>{if(!so||lock)return;setLock(true);const procs=[...(so.processos||[])];const idx=procs.findIndex(p=>!p.done);if(idx===-1){setFb({t:"warn",m:"Todos concluídos!"});setLock(false);return;}
-    const p=procs[idx];const dur=p.startTs?Date.now()-p.startTs:0;
-    procs[idx]={...p,started:true,done:true,startAt:p.startAt||new Date().toLocaleString("pt-BR"),doneAt:new Date().toLocaleString("pt-BR"),doneTs:Date.now(),duration:dur,operator:oper||p.operator||"",obs:obs||""};
-    saveTime(so.codigo,p.name,dur,oper||p.operator||"");
-    const allD=procs.every(x=>x.done);const upd={...so,processos:procs};if(allD){upd.dataBaixa=new Date().toLocaleDateString("pt-BR");upd.baixa="X";}
-    onUpdate(upd);setFb({t:"success",m:`✓ "${p.name}" concluído${dur?` em ${fmtDur(dur)}`:""}${allD?" — FINALIZADA!":""}`});beep(allD?"done":"ok");setObs("");setTimeout(()=>{setLock(false);ir.current?.focus();},500);};
+  // Estornar: desfaz o último processo bipado (started→false ou done→started)
+  const estornar=()=>{
+    if(!so)return;
+    const procs=[...(so.processos||[])];
+    // Procura o processo mais avançado que foi tocado
+    let idx=-1;
+    for(let i=procs.length-1;i>=0;i--){if(procs[i].done||procs[i].started){idx=i;break;}}
+    if(idx===-1){setFb({t:"warn",m:"Nenhum apontamento para estornar."});return;}
+    const p=procs[idx];
+    if(p.done){
+      // Estorna: volta de done para não iniciado
+      procs[idx]={...p,done:false,started:false,doneAt:"",doneTs:0,duration:0,operator:"",obs:""};
+      // Remove baixa se estava concluída
+      const upd={...so,processos:procs,baixa:"",dataBaixa:""};
+      onUpdate(upd);setFb({t:"warn",m:`↩ Estorno: "${p.name}" voltou para PENDENTE.`});beep("err");
+    } else if(p.started){
+      procs[idx]={...p,started:false,startAt:"",startTs:0,operator:""};
+      onUpdate({...so,processos:procs});setFb({t:"warn",m:`↩ Estorno: "${p.name}" voltou para NÃO INICIADO.`});beep("err");
+    }
+  };
+  // Marcar falta de material
+  const toggleFalta=()=>{if(!so)return;const upd={...so,faltaMaterial:!so.faltaMaterial};onUpdate(upd);setFb({t:upd.faltaMaterial?"error":"warn",m:upd.faltaMaterial?"⚠️ FALTA DE MATERIAL marcada nesta ordem.":"✓ Falta de material removida."});};
+  // Marcar em estoque no almoxarifado
+  const toggleEstoque=()=>{if(!so)return;const upd={...so,emEstoque:!so.emEstoque};onUpdate(upd);setFb({t:upd.emEstoque?"start":"warn",m:upd.emEstoque?"📦 Material disponível no almoxarifado marcado.":"📦 Estoque no almoxarifado removido."});};
   return(<div className="space-y-4">
     <div className="bg-white rounded-xl border-2 border-blue-300 shadow-lg p-4">
       <div className="flex items-center gap-3 mb-2"><span className="text-2xl">📡</span><h2 className="text-lg font-bold">Bipagem</h2></div>
-      <div className="flex gap-2 mb-2"><input value={oper} onChange={e=>setOper(e.target.value)} className="w-48 px-3 py-2 border rounded-lg text-sm" placeholder="👤 Operador"/><span className="text-xs text-gray-400 self-center">Bipe 1x=Iniciar, 2x=Finalizar</span></div>
+      <div className="flex gap-2 mb-2"><input value={maqScan} onChange={e=>setMaqScan(e.target.value)} className="w-48 px-3 py-2 border rounded-lg text-sm" placeholder="🏭 Máquina"/><span className="text-xs text-gray-400 self-center">Bipe 1x=Iniciar, 2x=Finalizar</span></div>
       <input ref={ir} value={si} onChange={e=>setSi(e.target.value)} onKeyDown={kd} className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg text-lg font-mono focus:ring-2 focus:ring-blue-500" placeholder="OP-XXXXX ou OP-XXXXX-PN" autoFocus/>
     </div>
     {fb&&<div className={`rounded-xl p-3 font-medium text-sm ${fb.t==="error"?"bg-red-50 text-red-700 border border-red-200":fb.t==="warn"?"bg-yellow-50 text-yellow-700 border border-yellow-200":fb.t==="start"?"bg-blue-50 text-blue-700 border border-blue-200":"bg-green-50 text-green-700 border border-green-200"}`}>{fb.m}</div>}
     {so&&<div className="bg-white rounded-xl border shadow-sm overflow-hidden">
-      <div className="p-3 bg-blue-50 border-b"><div className="flex justify-between"><div><span className="text-lg font-bold text-blue-900">Ctrl: {so.controle}</span><span className="ml-3 text-sm text-blue-700">{so.codigo} · Qt:{so.qtde} · Pri:{so.prioridade||"—"}</span><br/><span className="text-sm text-blue-600">{so.atender} · {so.maquina}</span></div><div className="flex flex-col items-end gap-1"><Badge color={dC(so.destino)}>{so.destino}</Badge><PrintDrawBtn code={so.codigo}/></div></div></div>
+      <div className="p-3 bg-blue-50 border-b"><div className="flex justify-between"><div>
+        <span className="text-lg font-bold text-blue-900">Ctrl: {so.controle}</span><span className="ml-3 text-sm text-blue-700">{so.codigo} · Qt:{so.qtde} · Pri:{so.prioridade||"—"}</span><br/>
+        <span className="text-sm text-blue-600">{so.atender} · {so.maquina}</span>
+        <div className="flex gap-1 mt-1 flex-wrap">
+          {so.cancelada&&<span className="px-2 py-0.5 text-xs font-bold bg-red-200 text-red-800 rounded-full">🚫 CANCELADA</span>}
+          {so.faltaMaterial&&<span className="px-2 py-0.5 text-xs font-bold bg-orange-200 text-orange-800 rounded-full">⚠️ FALTA MATERIAL</span>}
+          {so.emEstoque&&<span className="px-2 py-0.5 text-xs font-bold bg-teal-200 text-teal-800 rounded-full">📦 EM ESTOQUE</span>}
+        </div>
+      </div><div className="flex flex-col items-end gap-1"><Badge color={dC(so.destino)}>{so.destino}</Badge><PrintDrawBtn code={so.codigo}/></div></div></div>
       <div className="p-3"><div className="space-y-1.5">{(so.processos||[]).map((p,i)=>(<div key={i} className={`flex items-center gap-2 p-2 rounded-lg border-2 text-sm ${p.done?"bg-green-50 border-green-300":p.started?"bg-blue-50 border-blue-300":i===ci?"bg-yellow-50 border-yellow-400":"bg-gray-50 border-gray-200"}`}>
         <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${p.done?"bg-green-500 text-white":p.started?"bg-blue-500 text-white":i===ci?"bg-yellow-500 text-white":"bg-gray-300"}`}>{p.done?"✓":p.started?"▶":i+1}</div>
         <div className="flex-1"><span className={`font-medium ${p.done?"text-green-700 line-through":p.started?"text-blue-700":""}`}>{p.name}</span>
@@ -10928,8 +10955,15 @@ function ScanScreen({ordens,onUpdate}){
         <div className="px-3 py-2 bg-purple-50 flex items-center gap-2"><span className="text-xs font-bold text-purple-800 uppercase tracking-wide">🔧 Componentes da Montagem ({so.filhos.length})</span></div>
         <div className="divide-y">{so.filhos.map((f,i)=>{const fo=ordens.find(o=>o.codigo===f.code&&!o.baixa);const allDone=fo&&fo.processos?.length>0&&fo.processos.every(p=>p.done);const hasOpen=fo&&fo.processos?.some(p=>!p.done);return(<div key={i} className={`flex items-center gap-2 px-3 py-1.5 text-xs ${allDone?"bg-green-50":hasOpen?"bg-yellow-50":""}`}><span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold ${allDone?"bg-green-500 text-white":fo?"bg-yellow-400 text-white":"bg-gray-200 text-gray-500"}`}>{allDone?"✓":fo?"⚙":"?"}</span><span className="font-mono font-bold text-purple-700">{f.code}</span><span className="text-gray-500">Qt:{f.qty}</span>{fo&&<span className="text-gray-400">Ctrl:{fo.controle}</span>}{allDone&&<span className="text-green-600 font-medium">Pronto</span>}{hasOpen&&<span className="text-yellow-600 font-medium">Em processo</span>}{!fo&&<span className="text-gray-400 italic">sem ordem aberta</span>}</div>);})}</div>
       </div>}
-      {ci>=0&&<div className="p-3 border-t bg-gray-50"><textarea value={obs} onChange={e=>setObs(e.target.value)} rows={1} className="w-full px-3 py-1.5 border rounded-lg text-sm mb-2" placeholder="Obs (opcional)"/>
-        <button onClick={baixa} disabled={lock} className={`w-full py-2.5 rounded-lg font-bold ${lock?"bg-gray-400":"bg-green-600 hover:bg-green-700"} text-white`}>{lock?"⏳...":(`✓ ${so.processos[ci]?.started?"Finalizar":"Iniciar+Finalizar"}: ${so.processos[ci]?.name}`)}</button></div>}
+      {/* Ações de apontamento */}
+      <div className="p-3 border-t bg-gray-50 space-y-2">
+        <textarea value={obs} onChange={e=>setObs(e.target.value)} rows={1} className="w-full px-3 py-1.5 border rounded-lg text-sm" placeholder="Obs (opcional para finalizar processo)"/>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={estornar} className="px-3 py-2 rounded-lg text-sm font-medium bg-yellow-100 text-yellow-800 hover:bg-yellow-200 border border-yellow-300">↩ Estornar Apontamento</button>
+          <button onClick={toggleFalta} className={`px-3 py-2 rounded-lg text-sm font-medium border ${so.faltaMaterial?"bg-orange-500 text-white border-orange-600":"bg-orange-50 text-orange-700 hover:bg-orange-100 border-orange-300"}`}>⚠️ {so.faltaMaterial?"Falta Material ✓":"Falta Material"}</button>
+          <button onClick={toggleEstoque} className={`px-3 py-2 rounded-lg text-sm font-medium border ${so.emEstoque?"bg-teal-500 text-white border-teal-600":"bg-teal-50 text-teal-700 hover:bg-teal-100 border-teal-300"}`}>📦 {so.emEstoque?"Em Estoque ✓":"Em Estoque"}</button>
+        </div>
+      </div>
       {ci===-1&&so.processos?.length>0&&<div className="p-3 border-t bg-green-50 text-center text-green-700 font-bold">✓ Todos concluídos!</div>}
     </div>}
   </div>);}
@@ -10950,14 +10984,14 @@ function EtiquetaPrint({ordem,onClose,onPrint}){
   return(<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-auto"><div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-screen overflow-auto">
     <div className="sticky top-0 bg-white border-b p-3 z-10 flex justify-between items-center"><span className="font-bold">{ordem.controle} · {ordem.codigo}</span>
       <div className="flex gap-2"><PrintDrawBtn code={ordem.codigo}/><button onClick={doPrint} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium">🖨️ Etiqueta</button><button onClick={doDown} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm font-medium">⬇ HTML</button><button onClick={onClose} className="px-3 py-1.5 bg-gray-200 rounded-lg text-sm">✕</button></div></div>
-    <div className="p-4" ref={pr} style={{fontFamily:"Arial"}}>{rl(1)}<div style={{borderTop:"3px dashed #aaa",margin:"8px 0"}}></div>{rl(2)}</div>
+    <div className="p-4" ref={pr} style={{fontFamily:"Arial"}}>{rl(1)}</div>
   </div></div>);}
 
 function quickPrint(ordem,onPrint){
   const procs=ordem.processos||[];const mBC=`OP-${ordem.controle}`;
   const css=`@page{size:A4;margin:6mm 8mm;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial;color:#000;}.lbl{border:3px solid #000;page-break-inside:avoid;margin-bottom:8mm;}.hdr{background:#000;color:#fff;display:flex;justify-content:space-between;padding:6px 14px;}.hdr h1{font-size:15px;letter-spacing:3px;font-weight:900;}.row{display:flex;border-top:2px solid #000;}.c{padding:4px 8px;border-right:2px solid #000;}.c:last-child{border-right:none;}.cl{font-size:7px;font-weight:800;color:#555;text-transform:uppercase;}.cv{font-size:12px;font-weight:700;margin-top:1px;}.cb{font-size:26px;font-weight:900;}.cm{font-size:16px;font-weight:800;}.bc{border-top:2.5px solid #000;text-align:center;padding:6px 20px;background:#fafafa;}.bct{font-size:10px;font-family:monospace;margin-top:2px;font-weight:700;}.ps{border-top:3px solid #000;}.ph{background:#eee;text-align:center;font-size:8px;font-weight:900;padding:3px;border-bottom:2px solid #000;}.pr{display:flex;align-items:stretch;border-bottom:1.5px solid #000;}.pr:last-child{border-bottom:none;}.pn{width:30px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;border-right:2px solid #000;background:#f5f5f5;}.pm{flex:1;display:flex;align-items:center;padding:4px 10px;font-size:11px;font-weight:700;border-right:2px solid #000;min-height:42px;}.pb{padding:4px 6px;text-align:center;}.pbt{font-size:7px;font-family:monospace;margin-top:1px;}.pk{width:34px;border-left:2px solid #000;display:flex;align-items:center;justify-content:center;}.pkb{width:14px;height:14px;border:2px solid #000;}`;
   const mkL=via=>`<div class="lbl"><div class="hdr"><div style="display:flex;align-items:center;gap:10px"><img src="https://meitech.com.br/wp-content/themes/meitech/images/svg/logo-white.svg" style="height:18px" onerror="this.style.display='none'"><h1>ORDEM DE PRODUÇÃO</h1></div><span style="font-size:10px;color:#ccc">${via}ª VIA</span></div><div class="row"><div class="c" style="flex:1.2"><div class="cl">Controle</div><div class="cm" style="color:#003d8f">${ordem.controle}</div></div><div class="c" style="flex:1"><div class="cl">Data</div><div class="cv">${ordem.dataCriacao}</div></div><div class="c" style="flex:.7"><div class="cl">Prioridade</div><div class="cv" style="color:#b00;font-size:14px">${ordem.prioridade||"—"}</div></div><div class="c" style="flex:.6"><div class="cl">Qtde</div><div class="cm">${ordem.qtde}</div></div></div><div class="row"><div class="c" style="flex:1"><div class="cl">Pedido/Cliente</div><div class="cv">${ordem.atender||"—"}</div></div><div class="c" style="flex:1"><div class="cl">Máquina</div><div class="cv">${ordem.maquina||"—"}</div></div></div><div class="row"><div class="c" style="flex:1;text-align:center;padding:6px"><div class="cl">Código</div><div class="cb">${ordem.codigo}</div></div><div class="c" style="flex:.35;text-align:center;padding:6px"><div class="cl">Destino</div><div class="cm">${ordem.destino}</div></div></div><div class="bc">${bcS(mBC,400,45)}<div class="bct">${mBC}</div><div style="font-size:8px;color:#666;margin-top:2px">Desenho: ${drawUrl(ordem.codigo)}</div></div>${procs.length?`<div class="ps"><div class="ph">PROCESSOS — BIPAGEM</div>${procs.map((p,i)=>{const pbc=`OP-${ordem.controle}-P${i+1}`;return`<div class="pr"><div class="pn">${i+1}</div><div class="pm">${p.name}</div><div class="pb">${bcS(pbc,280,34)}<div class="pbt">${pbc}</div></div><div class="pk"><div class="pkb"></div></div></div>`;}).join("")}</div>`:""}</div>`;
-  const w=window.open("");if(w){w.document.write(`<!DOCTYPE html><html><head><style>${css}</style></head><body>${mkL(1)}<div style="border-top:3px dashed #aaa;margin:8px 0"></div>${mkL(2)}</body></html>`);w.document.close();setTimeout(()=>{w.focus();w.print();},500);if(onPrint)onPrint(ordem.id);}
+  const w=window.open("");if(w){w.document.write(`<!DOCTYPE html><html><head><style>${css}</style></head><body>${mkL(1)}</body></html>`);w.document.close();setTimeout(()=>{w.focus();w.print();},500);if(onPrint)onPrint(ordem.id);}
 }
 
 function GroupTab({ordens}){
@@ -11258,6 +11292,7 @@ function App(){
   const[drag,setDrag]=useState(false);const[proc,setProc]=useState(false);const[htmlErr,setHtmlErr]=useState("");
   const[prev,setPrev]=useState(null);const[prevPri,setPrevPri]=useState("");const[prevItems,setPrevItems]=useState([]);const[prevMult,setPrevMult]=useState(1);const[prevPedido,setPrevPedido]=useState("");const[prevCliente,setPrevCliente]=useState("");const[prevMaquina,setPrevMaquina]=useState("");const[dbg,setDbg]=useState("");
   const[confClear,setConfClear]=useState(false);
+  const[cancelModal,setCancelModal]=useState(null);// {id, obs}
   const[mf,setMf]=useState({codigo:"",qtde:1,destino:"USINAGEM",pedido:"",cliente:"",maquina:""});
   const fr=useRef();
 
@@ -11317,7 +11352,7 @@ function App(){
   // ← clearAll reseta para 1
   const clearAll=()=>{DB.ref("ordens").remove();DB.ref("times").remove();FB.setNextC(1);setConfClear(false);};
 
-  const getF=()=>{let d=[...ordens];if(fD!=="TODOS")d=d.filter(o=>o.destino===fD);if(fS==="ABERTA")d=d.filter(o=>!o.baixa);if(fS==="CONCLUÍDA")d=d.filter(o=>o.baixa==="X");if(srch){const q=srch.toLowerCase();d=d.filter(o=>(o.codigo||"").toLowerCase().includes(q)||(o.atender||"").toLowerCase().includes(q)||(o.maquina||"").toLowerCase().includes(q)||String(o.controle).includes(q));}if(sC)d.sort((a,b)=>{let va=a[sC],vb=b[sC];if(["controle","qtde","prioridade"].includes(sC)){va=Number(va)||0;vb=Number(vb)||0;}return va<vb?(sD==="asc"?-1:1):va>vb?(sD==="asc"?1:-1):0;});return d;};
+  const getF=()=>{let d=[...ordens];if(fD!=="TODOS")d=d.filter(o=>o.destino===fD);if(fS==="ABERTA")d=d.filter(o=>!o.baixa&&!o.cancelada);if(fS==="CONCLUÍDA")d=d.filter(o=>o.baixa==="X");if(fS==="CANCELADA")d=d.filter(o=>o.cancelada);if(fS==="FALTA")d=d.filter(o=>o.faltaMaterial);if(fS==="ESTOQUE")d=d.filter(o=>o.emEstoque);if(srch){const q=srch.toLowerCase();d=d.filter(o=>(o.codigo||"").toLowerCase().includes(q)||(o.atender||"").toLowerCase().includes(q)||(o.maquina||"").toLowerCase().includes(q)||String(o.controle).includes(q));}if(sC)d.sort((a,b)=>{let va=a[sC],vb=b[sC];if(["controle","qtde","prioridade"].includes(sC)){va=Number(va)||0;vb=Number(vb)||0;}return va<vb?(sD==="asc"?-1:1):va>vb?(sD==="asc"?1:-1):0;});return d;};
   const fl=getF();const st={total:ordens.length,ab:ordens.filter(o=>!o.baixa).length,co:ordens.filter(o=>o.baixa==="X").length};
   const gP=o=>{if(!o.processos?.length)return null;const done=o.processos.filter(p=>p.done).length;return{done,total:o.processos.length,pct:Math.round(done/o.processos.length*100)};};
   const addMan=f=>{const now=new Date().toLocaleDateString("pt-BR");const base=f.codigo.replace(/-\d+$/,"").toUpperCase();const procs=getProcs(base).map(p=>({...p,done:false,started:false,startAt:"",startTs:0,doneAt:"",doneTs:0,duration:0,operator:"",obs:""}));
@@ -11334,7 +11369,16 @@ function App(){
   if(!currentUser)return <LoginScreen onLogin={u=>{setCurrentUser(u);LS.set("op-session",{...u,ts:Date.now()});}}/>;
   if(!fbReady)return(<div className="min-h-screen bg-gray-900 flex items-center justify-center"><div className="text-center text-white"><div className="text-5xl mb-4">🔄</div><div className="text-xl font-bold mb-2">Conectando ao Firebase...</div><div className="text-gray-400 text-sm">Sincronizando dados em tempo real</div></div></div>);
   const isSupervisor=currentUser.role==="supervisor";
+  // Cancel modal handler
+  const confirmCancel=()=>{if(!cancelModal)return;const o=ordens.find(x=>x.id===cancelModal.id);if(o){updFull({...o,cancelada:true,obsCancelamento:cancelModal.obs||""});}setCancelModal(null);};
   return(<div className="min-h-screen bg-gray-50">
+    {/* Cancel Modal */}
+    {cancelModal&&<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+      <h3 className="font-bold text-lg text-red-700 mb-3">🚫 Cancelar Ordem</h3>
+      <p className="text-sm text-gray-600 mb-3">Informe o motivo do cancelamento. A ordem continuará visível na lista.</p>
+      <textarea value={cancelModal.obs} onChange={e=>setCancelModal({...cancelModal,obs:e.target.value})} rows={3} className="w-full px-3 py-2 border rounded-lg text-sm mb-4" placeholder="Motivo do cancelamento (obrigatório)" autoFocus/>
+      <div className="flex gap-2"><button onClick={()=>setCancelModal(null)} className="flex-1 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium">Voltar</button><button onClick={confirmCancel} disabled={!cancelModal.obs.trim()} className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-300 text-white rounded-lg text-sm font-bold">Confirmar Cancelamento</button></div>
+    </div></div>}
     {printO&&<EtiquetaPrint ordem={printO} onClose={()=>setPrintO(null)} onPrint={markPrinted}/>}
     <div className="bg-white border-b shadow-sm"><div className="max-w-7xl mx-auto px-4 py-2 flex items-center justify-between">
       <div className="flex items-center gap-3"><img src="https://meitech.com.br/wp-content/themes/meitech/images/svg/logo-white.svg" alt="Meitech" className="h-8 bg-gray-900 rounded px-2 py-1" onError={e=>{e.target.style.display='none'}}/>
@@ -11350,7 +11394,7 @@ function App(){
     </div></div>
 
     <div className="max-w-7xl mx-auto px-4 mt-3"><div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit flex-wrap">
-      {(isSupervisor?[["upload","🌐 HTML"],["manual","➕ Manual"],["ordens",`📋 Ordens (${st.total})`],["andamento",emAndamentoCount>0?`🔵 Em Andamento (${emAndamentoCount})`:"🔵 Em Andamento"],["group","📊 Agrupamento"],["machines","🏭 Máquinas"],["times","⏱ Tempos"],["scan","📡 Bipagem"],["usuarios","👥 Usuários"]]:[["scan","📡 Bipagem"],["andamento",emAndamentoCount>0?`🔵 Em Andamento (${emAndamentoCount})`:"🔵 Em Andamento"]]).map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} className={`px-3 py-1.5 text-sm font-medium rounded-md ${tab===k?"bg-white shadow text-blue-600":"text-gray-600"}`}>{l}</button>))}
+      {(isSupervisor?[["upload","🌐 HTML"],["manual","➕ Manual"],["ordens",`📋 Ordens (${st.total})`],["andamento",emAndamentoCount>0?`🔵 Em Andamento (${emAndamentoCount})`:"🔵 Em Andamento"],["group","📊 Agrupamento"],["machines","🏭 Máquinas"],["times","⏱ Tempos"],["scan","📡 Bipagem"],["usuarios","👥 Usuários"]]:[["scan","📡 Bipagem"],["andamento",emAndamentoCount>0?`🔵 Em Andamento (${emAndamentoCount})`:"🔵 Em Andamento"],["group","📊 Agrupamento"]]).map(([k,l])=>(<button key={k} onClick={()=>setTab(k)} className={`px-3 py-1.5 text-sm font-medium rounded-md ${tab===k?"bg-white shadow text-blue-600":"text-gray-600"}`}>{l}</button>))}
     </div></div>
 
     <div className="max-w-7xl mx-auto px-4 py-3">
@@ -11408,10 +11452,10 @@ function App(){
         <div className="bg-white rounded-xl border p-2"><div className="flex flex-wrap items-center gap-2">
           <input value={srch} onChange={e=>setSrch(e.target.value)} placeholder="Buscar..." className="flex-1 min-w-40 px-2 py-1.5 border rounded-lg text-sm"/>
           <select value={fD} onChange={e=>setFD(e.target.value)} className="px-2 py-1.5 border rounded-lg text-sm"><option value="TODOS">Todos Dest.</option>{["SOLDA","USINAGEM","MONTAGEM","CORTE","PINTURA"].map(d=><option key={d}>{d}</option>)}</select>
-          <select value={fS} onChange={e=>setFS(e.target.value)} className="px-2 py-1.5 border rounded-lg text-sm"><option value="TODOS">Todos</option><option value="ABERTA">Abertas</option><option value="CONCLUÍDA">Concluídas</option></select>
+          <select value={fS} onChange={e=>setFS(e.target.value)} className="px-2 py-1.5 border rounded-lg text-sm"><option value="TODOS">Todos</option><option value="ABERTA">Abertas</option><option value="CONCLUÍDA">Concluídas</option><option value="CANCELADA">Canceladas</option><option value="FALTA">Falta Material</option><option value="ESTOQUE">Em Estoque</option></select>
           {sel.size>0&&<button onClick={()=>{const sels=fl.filter(o=>sel.has(o.id));const css=`@page{size:A4;margin:6mm 8mm;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial;color:#000;}.lbl{border:3px solid #000;page-break-inside:avoid;margin-bottom:8mm;}.hdr{background:#000;color:#fff;display:flex;justify-content:space-between;padding:6px 14px;}.hdr h1{font-size:15px;letter-spacing:3px;font-weight:900;}.row{display:flex;border-top:2px solid #000;}.c{padding:4px 8px;border-right:2px solid #000;}.c:last-child{border-right:none;}.cl{font-size:7px;font-weight:800;color:#555;text-transform:uppercase;}.cv{font-size:12px;font-weight:700;margin-top:1px;}.cb{font-size:26px;font-weight:900;}.cm{font-size:16px;font-weight:800;}.bc{border-top:2.5px solid #000;text-align:center;padding:6px 20px;background:#fafafa;}.bct{font-size:10px;font-family:monospace;margin-top:2px;font-weight:700;}.ps{border-top:3px solid #000;}.ph{background:#eee;text-align:center;font-size:8px;font-weight:900;padding:3px;border-bottom:2px solid #000;}.pr{display:flex;align-items:stretch;border-bottom:1.5px solid #000;}.pr:last-child{border-bottom:none;}.pn{width:30px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:14px;border-right:2px solid #000;background:#f5f5f5;}.pm{flex:1;display:flex;align-items:center;padding:4px 10px;font-size:11px;font-weight:700;border-right:2px solid #000;min-height:42px;}.pb{padding:4px 6px;text-align:center;}.pbt{font-size:7px;font-family:monospace;margin-top:1px;}.pk{width:34px;border-left:2px solid #000;display:flex;align-items:center;justify-content:center;}.pkb{width:14px;height:14px;border:2px solid #000;}`;
-            const mkL=(o,via)=>{const procs=o.processos||[];const mBC=`OP-${o.controle}`;return`<div class="lbl"><div class="hdr"><div style="display:flex;align-items:center;gap:10px"><img src="https://meitech.com.br/wp-content/themes/meitech/images/svg/logo-white.svg" style="height:18px" onerror="this.style.display='none'"><h1>ORDEM DE PRODUÇÃO</h1></div><span style="font-size:10px;color:#ccc">${via}ª VIA</span></div><div class="row"><div class="c" style="flex:1.2"><div class="cl">Controle</div><div class="cm" style="color:#003d8f">${o.controle}</div></div><div class="c" style="flex:1"><div class="cl">Data</div><div class="cv">${o.dataCriacao}</div></div><div class="c" style="flex:.7"><div class="cl">Prioridade</div><div class="cv" style="color:#b00;font-size:14px">${o.prioridade||"—"}</div></div><div class="c" style="flex:.6"><div class="cl">Qtde</div><div class="cm">${o.qtde}</div></div></div><div class="row"><div class="c" style="flex:1"><div class="cl">Pedido/Cliente</div><div class="cv">${o.atender||"—"}</div></div><div class="c" style="flex:1"><div class="cl">Máquina</div><div class="cv">${o.maquina||"—"}</div></div></div><div class="row"><div class="c" style="flex:1;text-align:center;padding:6px"><div class="cl">Código</div><div class="cb">${o.codigo}</div></div><div class="c" style="flex:.35;text-align:center;padding:6px"><div class="cl">Destino</div><div class="cm">${o.destino}</div></div></div><div class="bc">${bcS(mBC,400,45)}<div class="bct">${mBC}</div></div>${procs.length?`<div class="ps"><div class="ph">PROCESSOS — BIPAGEM</div>${procs.map((p,i)=>{const pbc=`OP-${o.controle}-P${i+1}`;return`<div class="pr"><div class="pn">${i+1}</div><div class="pm">${p.name}</div><div class="pb">${bcS(pbc,280,34)}<div class="pbt">${pbc}</div></div><div class="pk"><div class="pkb"></div></div></div>`;}).join("")}</div>`:""}</div>`;};
-            const body=sels.map(o=>`${mkL(o,1)}<div style="border-top:3px dashed #aaa;margin:8px 0"></div>${mkL(o,2)}`).join('<div style="page-break-after:always"></div>');
+            const mkL=(o)=>{const procs=o.processos||[];const mBC=`OP-${o.controle}`;return`<div class="lbl"><div class="hdr"><div style="display:flex;align-items:center;gap:10px"><img src="https://meitech.com.br/wp-content/themes/meitech/images/svg/logo-white.svg" style="height:18px" onerror="this.style.display='none'"><h1>ORDEM DE PRODUÇÃO</h1></div></div><div class="row"><div class="c" style="flex:1.2"><div class="cl">Controle</div><div class="cm" style="color:#003d8f">${o.controle}</div></div><div class="c" style="flex:1"><div class="cl">Data</div><div class="cv">${o.dataCriacao}</div></div><div class="c" style="flex:.7"><div class="cl">Prioridade</div><div class="cv" style="color:#b00;font-size:14px">${o.prioridade||"—"}</div></div><div class="c" style="flex:.6"><div class="cl">Qtde</div><div class="cm">${o.qtde}</div></div></div><div class="row"><div class="c" style="flex:1"><div class="cl">Pedido/Cliente</div><div class="cv">${o.atender||"—"}</div></div><div class="c" style="flex:1"><div class="cl">Máquina</div><div class="cv">${o.maquina||"—"}</div></div></div><div class="row"><div class="c" style="flex:1;text-align:center;padding:6px"><div class="cl">Código</div><div class="cb">${o.codigo}</div></div><div class="c" style="flex:.35;text-align:center;padding:6px"><div class="cl">Destino</div><div class="cm">${o.destino}</div></div></div><div class="bc">${bcS(mBC,400,45)}<div class="bct">${mBC}</div></div>${procs.length?`<div class="ps"><div class="ph">PROCESSOS — BIPAGEM</div>${procs.map((p,i)=>{const pbc=`OP-${o.controle}-P${i+1}`;return`<div class="pr"><div class="pn">${i+1}</div><div class="pm">${p.name}</div><div class="pb">${bcS(pbc,280,34)}<div class="pbt">${pbc}</div></div><div class="pk"><div class="pkb"></div></div></div>`;}).join("")}</div>`:""}</div>`;};
+            const body=sels.map(o=>mkL(o)).join('<div style="page-break-after:always"></div>');
             const w=window.open("");if(w){w.document.write(`<!DOCTYPE html><html><head><style>${css}</style></head><body>${body}</body></html>`);w.document.close();setTimeout(()=>{w.focus();w.print();},500);markPrintedMany(sels.map(o=>o.id));}}} className="px-2 py-1.5 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium">🖨️ Imprimir ({sel.size})</button>}
           {sel.size>0&&<button onClick={delSel} className="px-2 py-1.5 bg-red-100 text-red-700 rounded-lg text-sm font-medium">Excluir ({sel.size})</button>}
         </div></div>
@@ -11421,8 +11465,10 @@ function App(){
             <th className="px-1 py-1.5 w-16"></th>
             {[["controle","Ctrl"],["codigo","Código"],["qtde","Qt"],["inicio","Início"],["destino","Destino"],["atender","Atender"],["prioridade","Pri"]].map(([k,l])=>(<th key={k} onClick={()=>doSort(k)} className="px-2 py-1.5 text-left text-xs font-medium text-gray-600 cursor-pointer select-none">{l}{sC===k&&(sD==="asc"?"↑":"↓")}</th>))}
             <th className="px-2 py-1.5 text-xs font-medium text-gray-600">Prog</th>
+            <th className="px-2 py-1.5 text-xs font-medium text-gray-600">Flags</th>
+            {isSupervisor&&<th className="px-1 py-1.5 w-8"></th>}
           </tr></thead>
-          <tbody>{!fl.length?<tr><td colSpan={9} className="py-8 text-center text-gray-400">Nenhuma ordem.</td></tr>:fl.map(o=>{const pr=gP(o);return(<tr key={o.id} className={`border-t hover:bg-blue-50 ${o.baixa?"bg-green-50/50":""}`}>
+          <tbody>{!fl.length?<tr><td colSpan={isSupervisor?12:11} className="py-8 text-center text-gray-400">Nenhuma ordem.</td></tr>:fl.map(o=>{const pr=gP(o);return(<tr key={o.id} className={`border-t hover:bg-blue-50 ${o.cancelada?"opacity-60 bg-red-50/30":o.baixa?"bg-green-50/50":""}`}>
             <td className="px-1 py-1"><input type="checkbox" checked={sel.has(o.id)} onChange={()=>togSel(o.id)}/></td>
             <td className="px-1 py-1 flex gap-0.5 items-center"><button onClick={()=>setPrintO(o)} className="hover:scale-110" title="Etiqueta">🏷️</button><button onClick={()=>quickPrint(o,markPrinted)} className="hover:scale-110" title="Imprimir etiqueta">🖨️</button><PrintDrawBtn code={o.codigo}/>{o.impressa&&<span className="text-green-600 text-xs" title={`Impresso: ${o.impressaEm}`}>✅</span>}</td>
             <td className="px-2 py-1 font-mono font-bold text-blue-600 text-xs">{o.controle}</td>
@@ -11433,6 +11479,8 @@ function App(){
             <td className="px-2 py-1 text-xs max-w-28 truncate" title={o.atender}>{o.atender}</td>
             <td className="px-2 py-1 font-bold text-red-600 text-xs">{o.prioridade||"—"}</td>
             <td className="px-2 py-1">{pr?<div className="flex items-center gap-1"><div className="flex-1 bg-gray-200 rounded-full h-1.5 min-w-12"><div className={`h-1.5 rounded-full ${pr.pct===100?"bg-green-500":"bg-blue-500"}`} style={{width:`${pr.pct}%`}}/></div><span className="text-xs text-gray-400">{pr.done}/{pr.total}</span></div>:<span className="text-xs text-gray-300">—</span>}</td>
+            <td className="px-2 py-1"><div className="flex gap-0.5 flex-wrap">{o.cancelada&&<span className="text-xs bg-red-100 text-red-700 px-1 rounded" title={o.obsCancelamento}>🚫Can</span>}{o.faltaMaterial&&<span className="text-xs bg-orange-100 text-orange-700 px-1 rounded">⚠️Mat</span>}{o.emEstoque&&<span className="text-xs bg-teal-100 text-teal-700 px-1 rounded">📦Est</span>}</div></td>
+            {isSupervisor&&<td className="px-1 py-1">{!o.cancelada?<button onClick={()=>setCancelModal({id:o.id,obs:""})} className="text-xs text-red-400 hover:text-red-600" title="Cancelar ordem">🚫</button>:<button onClick={()=>updFull({...o,cancelada:false,obsCancelamento:""})} className="text-xs text-gray-400 hover:text-gray-600" title="Reativar ordem">↩</button>}</td>}
           </tr>);})}</tbody></table>
         </div>{fl.length>0&&<div className="px-3 py-1.5 bg-gray-50 border-t text-xs text-gray-500">{fl.length} de {ordens.length}</div>}</div>
       </div>}
